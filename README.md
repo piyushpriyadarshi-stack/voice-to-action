@@ -7,7 +7,9 @@ Voice2Action is an AI-powered application that converts voice recordings into me
 
 ## 🚀 Live Demo
 
-👉 **[Open Voice2Action]([https://YOUR-APP-NAME.streamlit.app](https://voice2action-piyush.streamlit.app))**
+👉 **[Open Voice2Action](## 🚀 Run Locally
+
+👉 [Open Voice2Action](http://localhost:8501)))**
 
 ## 📌 Features
 
