@@ -5,7 +5,7 @@
 
 ## 🚀 Live Demo
 
-👉 **[Open Voice2Action]((https://voice-to-action-c9wgq3ps3ghucyosxqxz7t.streamlit.app/))**
+👉 **[Open Voice2Action](https://voice-to-action-c9wgq3ps3ghucyosxqxz7t.streamlit.app/)(https://voice-to-action-c9wgq3ps3ghucyosxqxz7t.streamlit.app/)**
 
 🌐 The application is publicly accessible from any device with an internet connection.
 ## 📌 Features
