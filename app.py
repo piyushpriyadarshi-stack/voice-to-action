@@ -1,16 +1,23 @@
-import streamlit as st
-import sqlite3
+# =========================================================
+# VOICE2ACTION
+# AI Meeting Assistant
+# Gemini Cloud AI + SQLite
+# =========================================================
+
+import os
 import json
 import hashlib
+import sqlite3
 import tempfile
-import requests
-import pandas as pd
 
 from pathlib import Path
 from datetime import datetime
 from io import BytesIO
 
-from faster_whisper import WhisperModel
+import pandas as pd
+import streamlit as st
+
+from google import genai
 
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import (
@@ -28,14 +35,14 @@ from reportlab.lib.styles import getSampleStyleSheet
 # CONFIGURATION
 # =========================================================
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "llama3.2"
-
 DATABASE = "voice2action.db"
+
+# Gemini model
+GEMINI_MODEL = "gemini-3.8-flash"
 
 
 # =========================================================
-# PAGE CONFIG
+# PAGE CONFIGURATION
 # =========================================================
 
 st.set_page_config(
@@ -46,11 +53,119 @@ st.set_page_config(
 
 
 # =========================================================
+# GEMINI API KEY
+# =========================================================
+
+def get_gemini_api_key():
+
+    try:
+        return st.secrets["GEMINI_API_KEY"]
+
+    except Exception:
+        return os.getenv("GEMINI_API_KEY")
+
+
+# =========================================================
+# GEMINI AUDIO ANALYSIS
+# =========================================================
+
+def analyze_audio_with_gemini(audio_path):
+
+    api_key = get_gemini_api_key()
+
+    if not api_key:
+
+        return (
+            None,
+            "Gemini API key is not configured."
+        )
+
+    try:
+
+        # Create Gemini client
+        client = genai.Client(
+            api_key=api_key
+        )
+
+        # Upload audio to Gemini
+        uploaded_file = client.files.upload(
+            file=audio_path
+        )
+
+        # Prompt
+        prompt = """
+You are Voice2Action, a professional AI meeting assistant.
+
+Analyze the uploaded meeting audio carefully.
+
+Return ONLY valid JSON.
+
+Use exactly this structure:
+
+{
+    "transcript": "Complete transcript of the meeting",
+
+    "summary": "Short and clear summary of the meeting",
+
+    "key_points": [
+        "Important point 1",
+        "Important point 2"
+    ],
+
+    "action_items": [
+        {
+            "task": "Task description",
+            "assigned_to": "Person responsible or Not specified",
+            "deadline": "Deadline or Not specified",
+            "priority": "High, Medium, Low, or Not specified",
+            "status": "Pending"
+        }
+    ]
+}
+
+Rules:
+
+1. Accurately transcribe the meeting audio.
+2. Do not invent information.
+3. Include important discussions in the summary.
+4. Extract the most important points.
+5. Identify tasks or responsibilities mentioned in the meeting.
+6. If the task owner is not mentioned, use "Not specified".
+7. If the deadline is not mentioned, use "Not specified".
+8. If priority is not mentioned, use "Not specified".
+9. Every new action item must have status "Pending".
+10. Return valid JSON only.
+11. Do not include markdown.
+12. Do not include explanations outside the JSON.
+"""
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                uploaded_file,
+                prompt
+            ]
+        )
+
+        return response.text, None
+
+    except Exception as e:
+
+        return (
+            None,
+            str(e)
+        )
+
+
+# =========================================================
 # DATABASE
 # =========================================================
 
 def get_connection():
-    return sqlite3.connect(DATABASE)
+
+    return sqlite3.connect(
+        DATABASE
+    )
 
 
 def init_database():
@@ -58,7 +173,7 @@ def init_database():
     connection = get_connection()
     cursor = connection.cursor()
 
-    # USERS
+    # USERS TABLE
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +182,7 @@ def init_database():
         )
     """)
 
-    # MEETINGS
+    # MEETINGS TABLE
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS meetings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,11 +200,12 @@ def init_database():
     connection.close()
 
 
+# Initialize database
 init_database()
 
 
 # =========================================================
-# PASSWORD HASH
+# PASSWORD HASHING
 # =========================================================
 
 def hash_password(password):
@@ -103,7 +219,10 @@ def hash_password(password):
 # REGISTER USER
 # =========================================================
 
-def register_user(username, password):
+def register_user(
+    username,
+    password
+):
 
     connection = get_connection()
     cursor = connection.cursor()
@@ -113,7 +232,10 @@ def register_user(username, password):
         cursor.execute(
             """
             INSERT INTO users
-            (username, password)
+            (
+                username,
+                password
+            )
             VALUES (?, ?)
             """,
             (
@@ -139,14 +261,19 @@ def register_user(username, password):
 # LOGIN USER
 # =========================================================
 
-def login_user(username, password):
+def login_user(
+    username,
+    password
+):
 
     connection = get_connection()
     cursor = connection.cursor()
 
     cursor.execute(
         """
-        SELECT id, username
+        SELECT
+            id,
+            username
         FROM users
         WHERE username = ?
         AND password = ?
@@ -241,10 +368,13 @@ def get_user_meetings(user_id):
 
 
 # =========================================================
-# GET MEETING
+# GET SINGLE MEETING
 # =========================================================
 
-def get_meeting(meeting_id, user_id):
+def get_meeting(
+    meeting_id,
+    user_id
+):
 
     connection = get_connection()
     cursor = connection.cursor()
@@ -273,7 +403,10 @@ def get_meeting(meeting_id, user_id):
 # DELETE MEETING
 # =========================================================
 
-def delete_meeting(meeting_id, user_id):
+def delete_meeting(
+    meeting_id,
+    user_id
+):
 
     connection = get_connection()
     cursor = connection.cursor()
@@ -311,13 +444,27 @@ def update_task_status(
     )
 
     if not meeting:
+
         return False
 
-    tasks = json.loads(
-        meeting[6]
-    )
+    try:
 
-    if task_index < 0 or task_index >= len(tasks):
+        tasks = json.loads(
+            meeting[6]
+        )
+
+    except (
+        json.JSONDecodeError,
+        TypeError
+    ):
+
+        return False
+
+    if (
+        task_index < 0
+        or task_index >= len(tasks)
+    ):
+
         return False
 
     tasks[task_index]["status"] = new_status
@@ -346,264 +493,94 @@ def update_task_status(
 
 
 # =========================================================
-# WHISPER MODEL
-# =========================================================
-
-@st.cache_resource
-def load_whisper():
-
-    return WhisperModel(
-        "base",
-        device="cpu",
-        compute_type="int8"
-    )
-
-
-# =========================================================
-# TRANSCRIBE AUDIO
-# =========================================================
-
-def transcribe_audio(audio_path):
-
-    model = load_whisper()
-
-    segments, info = model.transcribe(
-        audio_path,
-        beam_size=5
-    )
-
-    transcript = ""
-
-    for segment in segments:
-
-        transcript += (
-            segment.text.strip()
-            + " "
-        )
-
-    return transcript.strip()
-
-
-# =========================================================
-# CHECK OLLAMA
-# =========================================================
-
-def check_ollama():
-
-    try:
-
-        response = requests.get(
-            "http://localhost:11434/api/tags",
-            timeout=5
-        )
-
-        if response.status_code == 200:
-
-            models = response.json().get(
-                "models",
-                []
-            )
-
-            model_names = [
-                model.get("name", "")
-                for model in models
-            ]
-
-            if (
-                OLLAMA_MODEL in model_names
-                or any(
-                    name.startswith(
-                        OLLAMA_MODEL + ":"
-                    )
-                    for name in model_names
-                )
-            ):
-
-                return True, "Ollama and model are ready."
-
-            return True, (
-                f"Ollama is running, but "
-                f"{OLLAMA_MODEL} was not found."
-            )
-
-        return False, "Ollama is not responding correctly."
-
-    except requests.exceptions.ConnectionError:
-
-        return False, (
-            "Ollama is not running. "
-            "Start Ollama first."
-        )
-
-    except Exception as e:
-
-        return False, str(e)
-
-
-# =========================================================
-# OLLAMA AI ANALYSIS
-# =========================================================
-
-def analyze_with_ollama(transcript):
-
-    prompt = f"""
-You are Voice2Action, an AI meeting assistant.
-
-Analyze the following meeting transcript.
-
-TRANSCRIPT:
-{transcript}
-
-Return ONLY valid JSON.
-
-Use exactly this structure:
-
-{{
-    "summary": "Short and clear meeting summary",
-
-    "key_points": [
-        "Important point 1",
-        "Important point 2"
-    ],
-
-    "action_items": [
-        {{
-            "task": "Task description",
-            "assigned_to": "Person or Not specified",
-            "deadline": "Deadline or Not specified",
-            "priority": "High, Medium, Low, or Not specified",
-            "status": "Pending"
-        }}
-    ]
-}}
-
-IMPORTANT RULES:
-
-1. Do not invent information.
-2. Only use information present in the transcript.
-3. If an owner is not mentioned, use "Not specified".
-4. If a deadline is not mentioned, use "Not specified".
-5. If priority is not mentioned, use "Not specified".
-6. Status must initially be "Pending".
-7. Return valid JSON only.
-"""
-
-    data = {
-
-        "model": OLLAMA_MODEL,
-
-        "messages": [
-
-            {
-                "role": "system",
-                "content": (
-                    "You are a professional "
-                    "meeting analysis assistant."
-                )
-            },
-
-            {
-                "role": "user",
-                "content": prompt
-            }
-
-        ],
-
-        "stream": False
-    }
-
-    try:
-
-        response = requests.post(
-            OLLAMA_URL,
-            json=data,
-            timeout=300
-        )
-
-        if response.status_code != 200:
-
-            return None, response.text
-
-        result = response.json()
-
-        if "message" not in result:
-
-            return None, (
-                "Unexpected Ollama response."
-            )
-
-        content = result[
-            "message"
-        ].get(
-            "content",
-            ""
-        )
-
-        return content, None
-
-    except requests.exceptions.ConnectionError:
-
-        return None, (
-            "Cannot connect to Ollama. "
-            "Make sure Ollama is running."
-        )
-
-    except requests.exceptions.Timeout:
-
-        return None, (
-            "Ollama took too long to respond."
-        )
-
-    except Exception as e:
-
-        return None, str(e)
-
-
-# =========================================================
 # PARSE AI JSON
 # =========================================================
 
 def parse_ai_response(response):
 
     if not response:
+
         return None
+
+    response = response.strip()
+
+    # -----------------------------------------------------
+    # Remove markdown code fences
+    # -----------------------------------------------------
+
+    if response.startswith("```"):
+
+        lines = response.splitlines()
+
+        if lines:
+
+            lines = lines[1:]
+
+        if (
+            lines
+            and lines[-1].strip() == "```"
+        ):
+
+            lines = lines[:-1]
+
+        response = "\n".join(
+            lines
+        ).strip()
+
+    # -----------------------------------------------------
+    # Direct JSON
+    # -----------------------------------------------------
 
     try:
 
-        return json.loads(response)
+        return json.loads(
+            response
+        )
 
     except json.JSONDecodeError:
 
-        start = response.find("{")
-        end = response.rfind("}")
+        pass
 
-        if start != -1 and end != -1:
+    # -----------------------------------------------------
+    # Find JSON object inside response
+    # -----------------------------------------------------
 
-            try:
+    start = response.find("{")
+    end = response.rfind("}")
 
-                return json.loads(
-                    response[
-                        start:end + 1
-                    ]
-                )
+    if (
+        start != -1
+        and end != -1
+    ):
 
-            except json.JSONDecodeError:
+        try:
 
-                return None
+            return json.loads(
+                response[
+                    start:end + 1
+                ]
+            )
+
+        except json.JSONDecodeError:
+
+            return None
 
     return None
 
 
 # =========================================================
-# NORMALIZE ANALYSIS
+# NORMALIZE AI ANALYSIS
 # =========================================================
 
-def normalize_analysis(analysis):
+def normalize_analysis(
+    analysis
+):
 
     if not isinstance(
         analysis,
         dict
     ):
+
         return None
 
     summary = analysis.get(
@@ -625,12 +602,14 @@ def normalize_analysis(analysis):
         key_points,
         list
     ):
+
         key_points = []
 
     if not isinstance(
         action_items,
         list
     ):
+
         action_items = []
 
     normalized_tasks = []
@@ -641,41 +620,58 @@ def normalize_analysis(analysis):
             task,
             dict
         ):
+
             continue
 
         normalized_tasks.append(
             {
-                "task": task.get(
-                    "task",
-                    "Not specified"
+                "task": str(
+                    task.get(
+                        "task",
+                        "Not specified"
+                    )
                 ),
 
-                "assigned_to": task.get(
-                    "assigned_to",
-                    "Not specified"
+                "assigned_to": str(
+                    task.get(
+                        "assigned_to",
+                        "Not specified"
+                    )
                 ),
 
-                "deadline": task.get(
-                    "deadline",
-                    "Not specified"
+                "deadline": str(
+                    task.get(
+                        "deadline",
+                        "Not specified"
+                    )
                 ),
 
-                "priority": task.get(
-                    "priority",
-                    "Not specified"
+                "priority": str(
+                    task.get(
+                        "priority",
+                        "Not specified"
+                    )
                 ),
 
-                "status": task.get(
-                    "status",
-                    "Pending"
+                "status": str(
+                    task.get(
+                        "status",
+                        "Pending"
+                    )
                 )
             }
         )
 
     return {
-        "summary": summary,
-        "key_points": key_points,
-        "action_items": normalized_tasks
+        "summary": str(summary),
+
+        "key_points": [
+            str(point)
+            for point in key_points
+        ],
+
+        "action_items":
+            normalized_tasks
     }
 
 
@@ -701,6 +697,10 @@ def create_pdf(
 
     elements = []
 
+    # -----------------------------------------------------
+    # TITLE
+    # -----------------------------------------------------
+
     elements.append(
         Paragraph(
             "Voice2Action Meeting Report",
@@ -709,8 +709,15 @@ def create_pdf(
     )
 
     elements.append(
-        Spacer(1, 20)
+        Spacer(
+            1,
+            20
+        )
     )
+
+    # -----------------------------------------------------
+    # MEETING
+    # -----------------------------------------------------
 
     elements.append(
         Paragraph(
@@ -720,8 +727,15 @@ def create_pdf(
     )
 
     elements.append(
-        Spacer(1, 10)
+        Spacer(
+            1,
+            10
+        )
     )
+
+    # -----------------------------------------------------
+    # SUMMARY
+    # -----------------------------------------------------
 
     elements.append(
         Paragraph(
@@ -732,14 +746,21 @@ def create_pdf(
 
     elements.append(
         Paragraph(
-            summary,
+            str(summary),
             styles["BodyText"]
         )
     )
 
     elements.append(
-        Spacer(1, 15)
+        Spacer(
+            1,
+            15
+        )
     )
+
+    # -----------------------------------------------------
+    # KEY POINTS
+    # -----------------------------------------------------
 
     elements.append(
         Paragraph(
@@ -758,8 +779,15 @@ def create_pdf(
         )
 
     elements.append(
-        Spacer(1, 15)
+        Spacer(
+            1,
+            15
+        )
     )
+
+    # -----------------------------------------------------
+    # ACTION ITEMS
+    # -----------------------------------------------------
 
     elements.append(
         Paragraph(
@@ -769,7 +797,6 @@ def create_pdf(
     )
 
     table_data = [
-
         [
             "Task",
             "Assigned To",
@@ -777,13 +804,11 @@ def create_pdf(
             "Priority",
             "Status"
         ]
-
     ]
 
     for item in action_items:
 
         table_data.append(
-
             [
                 item.get(
                     "task",
@@ -810,7 +835,18 @@ def create_pdf(
                     "Pending"
                 )
             ]
+        )
 
+    if len(table_data) == 1:
+
+        table_data.append(
+            [
+                "No action items",
+                "-",
+                "-",
+                "-",
+                "-"
+            ]
         )
 
     table = Table(
@@ -819,11 +855,8 @@ def create_pdf(
     )
 
     table.setStyle(
-
         TableStyle(
-
             [
-
                 (
                     "BACKGROUND",
                     (0, 0),
@@ -860,14 +893,16 @@ def create_pdf(
                     8
                 )
             ]
-
         )
-
     )
 
-    elements.append(table)
+    elements.append(
+        table
+    )
 
-    document.build(elements)
+    document.build(
+        elements
+    )
 
     buffer.seek(0)
 
@@ -882,21 +917,26 @@ if "logged_in" not in st.session_state:
 
     st.session_state.logged_in = False
 
+
 if "user_id" not in st.session_state:
 
     st.session_state.user_id = None
+
 
 if "username" not in st.session_state:
 
     st.session_state.username = None
 
+
 if "analysis" not in st.session_state:
 
     st.session_state.analysis = None
 
+
 if "last_transcript" not in st.session_state:
 
     st.session_state.last_transcript = None
+
 
 if "last_filename" not in st.session_state:
 
@@ -909,16 +949,21 @@ if "last_filename" not in st.session_state:
 
 if not st.session_state.logged_in:
 
-    st.title("🎙️ Voice2Action")
+    st.title(
+        "🎙️ Voice2Action"
+    )
 
     st.subheader(
-        "Local AI Meeting Assistant"
+        "AI Meeting Assistant"
     )
 
     st.info(
-        "Free architecture: "
-        "Faster-Whisper + Ollama + SQLite"
+        "☁️ Powered by Gemini Cloud AI"
     )
+
+    # -----------------------------------------------------
+    # LOGIN / REGISTER TABS
+    # -----------------------------------------------------
 
     login_tab, register_tab = st.tabs(
         [
@@ -927,9 +972,9 @@ if not st.session_state.logged_in:
         ]
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # LOGIN
-    # -----------------------------------------------------
+    # =====================================================
 
     with login_tab:
 
@@ -957,8 +1002,14 @@ if not st.session_state.logged_in:
             if user:
 
                 st.session_state.logged_in = True
-                st.session_state.user_id = user[0]
-                st.session_state.username = user[1]
+
+                st.session_state.user_id = (
+                    user[0]
+                )
+
+                st.session_state.username = (
+                    user[1]
+                )
 
                 st.rerun()
 
@@ -968,19 +1019,21 @@ if not st.session_state.logged_in:
                     "Invalid username or password."
                 )
 
-    # -----------------------------------------------------
+    # =====================================================
     # REGISTER
-    # -----------------------------------------------------
+    # =====================================================
 
     with register_tab:
 
         new_username = st.text_input(
-            "Create Username"
+            "Create Username",
+            key="register_username"
         )
 
         new_password = st.text_input(
             "Create Password",
-            type="password"
+            type="password",
+            key="register_password"
         )
 
         if st.button(
@@ -988,7 +1041,10 @@ if not st.session_state.logged_in:
             use_container_width=True
         ):
 
-            if not new_username or not new_password:
+            if (
+                not new_username
+                or not new_password
+            ):
 
                 st.warning(
                     "Enter username and password."
@@ -1018,7 +1074,9 @@ if not st.session_state.logged_in:
 
 with st.sidebar:
 
-    st.header("🎙️ Voice2Action")
+    st.header(
+        "🎙️ Voice2Action"
+    )
 
     st.caption(
         f"Logged in as: "
@@ -1046,11 +1104,16 @@ with st.sidebar:
     ):
 
         st.session_state.logged_in = False
+
         st.session_state.user_id = None
+
         st.session_state.username = None
 
         st.session_state.analysis = None
+
         st.session_state.last_transcript = None
+
+        st.session_state.last_filename = None
 
         st.rerun()
 
@@ -1070,16 +1133,26 @@ meetings = get_user_meetings(
 
 if page == "📊 Dashboard":
 
-    st.title("📊 Dashboard")
+    st.title(
+        "📊 Dashboard"
+    )
 
     st.write(
         f"Welcome, **{st.session_state.username}** 👋"
     )
 
-    total_meetings = len(meetings)
+    # -----------------------------------------------------
+    # MEETING STATISTICS
+    # -----------------------------------------------------
+
+    total_meetings = len(
+        meetings
+    )
 
     total_tasks = 0
+
     completed_tasks = 0
+
     pending_tasks = 0
 
     for _, row in meetings.iterrows():
@@ -1097,17 +1170,23 @@ if page == "📊 Dashboard":
                     meeting[6]
                 )
 
-            except:
+            except (
+                json.JSONDecodeError,
+                TypeError
+            ):
 
                 tasks = []
 
-            total_tasks += len(tasks)
+            total_tasks += len(
+                tasks
+            )
 
             for task in tasks:
 
-                if task.get(
-                    "status"
-                ) == "Completed":
+                if (
+                    task.get("status")
+                    == "Completed"
+                ):
 
                     completed_tasks += 1
 
@@ -1115,6 +1194,9 @@ if page == "📊 Dashboard":
 
                     pending_tasks += 1
 
+    # -----------------------------------------------------
+    # METRICS
+    # -----------------------------------------------------
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -1146,47 +1228,31 @@ if page == "📊 Dashboard":
             completed_tasks
         )
 
-
     st.divider()
 
+    # -----------------------------------------------------
+    # GEMINI STATUS
+    # -----------------------------------------------------
+
     st.subheader(
-        "🤖 Local AI Engine"
+        "☁️ Gemini Cloud AI"
     )
 
-    ollama_ok, ollama_message = check_ollama()
-
-    if ollama_ok:
+    if get_gemini_api_key():
 
         st.success(
-            f"🟢 {ollama_message}"
+            f"🟢 Gemini is configured "
+            f"using {GEMINI_MODEL}"
         )
 
     else:
 
         st.error(
-            f"🔴 {ollama_message}"
+            "🔴 Gemini API key is not configured."
         )
 
-
-    st.divider()
-
-    st.subheader(
-        "🕒 Recent Meetings"
-    )
-
-    if meetings.empty:
-
-        st.info(
-            "No meetings yet. "
-            "Analyze your first meeting."
-        )
-
-    else:
-
-        st.dataframe(
-            meetings.head(10),
-            use_container_width=True,
-            hide_index=True
+        st.caption(
+            "Add GEMINI_API_KEY to Streamlit Secrets."
         )
 
 
@@ -1203,15 +1269,19 @@ elif page == "🎵 Analyze Meeting":
     st.write(
         "Upload a meeting recording and "
         "Voice2Action will convert it into "
-        "structured information."
+        "structured information using Gemini AI."
     )
 
     st.info(
-        "Supported: WAV, MP3, M4A, FLAC, OGG"
+        "Supported formats: WAV, MP3, M4A, FLAC, OGG"
     )
 
+    # -----------------------------------------------------
+    # AUDIO UPLOAD
+    # -----------------------------------------------------
+
     uploaded_file = st.file_uploader(
-        "Upload audio",
+        "Upload meeting audio",
         type=[
             "wav",
             "mp3",
@@ -1231,12 +1301,36 @@ elif page == "🎵 Analyze Meeting":
             uploaded_file
         )
 
+        # -------------------------------------------------
+        # GEMINI STATUS
+        # -------------------------------------------------
+
+        st.info(
+            "☁️ Powered by Gemini Cloud AI"
+        )
+
+        if not get_gemini_api_key():
+
+            st.warning(
+                "Gemini API key is not configured. "
+                "Please add GEMINI_API_KEY in Streamlit Secrets."
+            )
+
+        # -------------------------------------------------
+        # MEETING TITLE
+        # -------------------------------------------------
+
         meeting_title = st.text_input(
             "Meeting title",
             value=Path(
                 uploaded_file.name
-            ).stem
+            ).stem,
+            key="meeting_title"
         )
+
+        # -------------------------------------------------
+        # ANALYZE BUTTON
+        # -------------------------------------------------
 
         if st.button(
             "🚀 Analyze Meeting",
@@ -1244,160 +1338,188 @@ elif page == "🎵 Analyze Meeting":
             use_container_width=True
         ):
 
-            extension = Path(
-                uploaded_file.name
-            ).suffix
+            if not get_gemini_api_key():
 
-            with tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=extension
-            ) as temp:
-
-                temp.write(
-                    uploaded_file.read()
+                st.error(
+                    "Gemini API key is not configured."
                 )
 
-                audio_path = temp.name
+                st.stop()
 
+            audio_path = None
 
-            # -------------------------------------------------
-            # WHISPER
-            # -------------------------------------------------
+            try:
 
-            with st.spinner(
-                "🎤 Transcribing audio..."
-            ):
+                # -----------------------------------------
+                # SAVE TEMPORARY AUDIO
+                # -----------------------------------------
 
-                try:
+                extension = Path(
+                    uploaded_file.name
+                ).suffix
 
-                    transcript = transcribe_audio(
-                        audio_path
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=extension
+                ) as temp:
+
+                    temp.write(
+                        uploaded_file.getvalue()
                     )
 
-                except Exception as e:
+                    audio_path = temp.name
+
+                # -----------------------------------------
+                # GEMINI ANALYSIS
+                # -----------------------------------------
+
+                with st.spinner(
+                    "☁️ Gemini AI is analyzing your meeting..."
+                ):
+
+                    response, error = (
+                        analyze_audio_with_gemini(
+                            audio_path
+                        )
+                    )
+
+                # -----------------------------------------
+                # AI ERROR
+                # -----------------------------------------
+
+                if error:
 
                     st.error(
-                        f"Transcription failed: {e}"
+                        f"AI analysis failed: {error}"
                     )
 
                     st.stop()
 
+                # -----------------------------------------
+                # PARSE AI RESPONSE
+                # -----------------------------------------
 
-            if not transcript:
-
-                st.error(
-                    "No speech detected."
+                parsed = parse_ai_response(
+                    response
                 )
 
-                st.stop()
+                if not parsed:
 
+                    st.error(
+                        "Gemini returned invalid JSON."
+                    )
 
-            st.success(
-                "🎤 Transcription completed."
-            )
+                    with st.expander(
+                        "Show Gemini response"
+                    ):
 
+                        st.code(
+                            response
+                            or "No response"
+                        )
 
-            # -------------------------------------------------
-            # OLLAMA
-            # -------------------------------------------------
+                    st.stop()
 
-            with st.spinner(
-                "🤖 Local AI analyzing meeting..."
-            ):
+                # -----------------------------------------
+                # EXTRACT TRANSCRIPT
+                # -----------------------------------------
 
-                response, error = analyze_with_ollama(
+                transcript = parsed.get(
+                    "transcript",
+                    ""
+                )
+
+                if not transcript:
+
+                    transcript = (
+                        "Transcript not available."
+                    )
+
+                # -----------------------------------------
+                # NORMALIZE ANALYSIS
+                # -----------------------------------------
+
+                analysis = normalize_analysis(
+                    parsed
+                )
+
+                if not analysis:
+
+                    st.error(
+                        "Unable to process Gemini analysis."
+                    )
+
+                    st.stop()
+
+                # -----------------------------------------
+                # SAVE SESSION
+                # -----------------------------------------
+
+                st.session_state.analysis = (
+                    analysis
+                )
+
+                st.session_state.last_transcript = (
                     transcript
                 )
 
+                st.session_state.last_filename = (
+                    meeting_title
+                )
 
-            if error:
+                # -----------------------------------------
+                # SAVE DATABASE
+                # -----------------------------------------
+
+                save_meeting(
+                    st.session_state.user_id,
+                    meeting_title,
+                    transcript,
+                    analysis["summary"],
+                    analysis["key_points"],
+                    analysis["action_items"]
+                )
+
+                st.success(
+                    "💾 Meeting analyzed and saved successfully."
+                )
+
+            except Exception as e:
 
                 st.error(
-                    error
+                    f"Unexpected error: {e}"
                 )
 
-                st.info(
-                    "Make sure Ollama is running "
-                    "and Llama 3.2 is installed."
-                )
+            finally:
 
-                st.stop()
+                # -----------------------------------------
+                # REMOVE TEMP AUDIO FILE
+                # -----------------------------------------
 
+                if audio_path:
 
-            # -------------------------------------------------
-            # PARSE
-            # -------------------------------------------------
+                    try:
 
-            analysis = parse_ai_response(
-                response
-            )
+                        os.remove(
+                            audio_path
+                        )
 
-            analysis = normalize_analysis(
-                analysis
-            )
+                    except OSError:
 
+                        pass
 
-            if not analysis:
-
-                st.error(
-                    "AI returned invalid JSON."
-                )
-
-                with st.expander(
-                    "Show AI response"
-                ):
-
-                    st.code(
-                        response
-                    )
-
-                st.stop()
-
-
-            # SAVE TO SESSION
-            st.session_state.analysis = analysis
-            st.session_state.last_transcript = transcript
-            st.session_state.last_filename = (
-                meeting_title
-            )
-
-
-            # -------------------------------------------------
-            # SAVE DATABASE
-            # -------------------------------------------------
-
-            save_meeting(
-
-                st.session_state.user_id,
-
-                meeting_title,
-
-                transcript,
-
-                analysis["summary"],
-
-                analysis["key_points"],
-
-                analysis["action_items"]
-
-            )
-
-
-            st.success(
-                "💾 Meeting saved successfully."
-            )
-
-
-    # ---------------------------------------------------------
+    # =====================================================
     # DISPLAY LAST ANALYSIS
-    # ---------------------------------------------------------
+    # =====================================================
 
     if (
         st.session_state.analysis
         and st.session_state.last_transcript
     ):
 
-        analysis = st.session_state.analysis
+        analysis = (
+            st.session_state.analysis
+        )
 
         transcript = (
             st.session_state.last_transcript
@@ -1407,8 +1529,11 @@ elif page == "🎵 Analyze Meeting":
             st.session_state.last_filename
         )
 
-
         st.divider()
+
+        # -------------------------------------------------
+        # TRANSCRIPT
+        # -------------------------------------------------
 
         st.header(
             "📝 Transcript"
@@ -1423,6 +1548,9 @@ elif page == "🎵 Analyze Meeting":
                 transcript
             )
 
+        # -------------------------------------------------
+        # SUMMARY
+        # -------------------------------------------------
 
         st.header(
             "📋 Summary"
@@ -1432,6 +1560,9 @@ elif page == "🎵 Analyze Meeting":
             analysis["summary"]
         )
 
+        # -------------------------------------------------
+        # KEY POINTS
+        # -------------------------------------------------
 
         st.header(
             "💡 Key Points"
@@ -1439,7 +1570,9 @@ elif page == "🎵 Analyze Meeting":
 
         if analysis["key_points"]:
 
-            for point in analysis["key_points"]:
+            for point in analysis[
+                "key_points"
+            ]:
 
                 st.write(
                     f"✅ {point}"
@@ -1451,6 +1584,9 @@ elif page == "🎵 Analyze Meeting":
                 "No key points detected."
             )
 
+        # -------------------------------------------------
+        # ACTION ITEMS
+        # -------------------------------------------------
 
         st.header(
             "✅ Action Items"
@@ -1467,7 +1603,6 @@ elif page == "🎵 Analyze Meeting":
             for item in tasks:
 
                 task_table.append(
-
                     {
                         "Task":
                             item.get(
@@ -1499,11 +1634,12 @@ elif page == "🎵 Analyze Meeting":
                                 "Pending"
                             )
                     }
-
                 )
 
             st.dataframe(
-                pd.DataFrame(task_table),
+                pd.DataFrame(
+                    task_table
+                ),
                 use_container_width=True,
                 hide_index=True
             )
@@ -1514,10 +1650,9 @@ elif page == "🎵 Analyze Meeting":
                 "No action items detected."
             )
 
-
-        # -----------------------------------------------------
-        # DOWNLOAD
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # EXPORT
+        # -------------------------------------------------
 
         st.divider()
 
@@ -1527,73 +1662,69 @@ elif page == "🎵 Analyze Meeting":
 
         col1, col2, col3 = st.columns(3)
 
+        # ---------------------------------------------
+        # TRANSCRIPT DOWNLOAD
+        # ---------------------------------------------
+
         with col1:
 
             st.download_button(
-
                 "📝 Transcript",
-
                 transcript,
-
-                file_name=(
-                    "transcript.txt"
-                ),
-
+                file_name="transcript.txt",
                 mime="text/plain",
-
                 use_container_width=True
             )
 
+        # ---------------------------------------------
+        # JSON DOWNLOAD
+        # ---------------------------------------------
 
         with col2:
 
             json_data = json.dumps(
-                analysis,
+                {
+                    "transcript":
+                        transcript,
+
+                    "summary":
+                        analysis["summary"],
+
+                    "key_points":
+                        analysis["key_points"],
+
+                    "action_items":
+                        analysis["action_items"]
+                },
                 indent=4
             )
 
             st.download_button(
-
                 "🧠 AI Analysis",
-
                 json_data,
-
-                file_name=(
-                    "meeting_analysis.json"
-                ),
-
+                file_name="meeting_analysis.json",
                 mime="application/json",
-
                 use_container_width=True
             )
 
+        # ---------------------------------------------
+        # PDF DOWNLOAD
+        # ---------------------------------------------
 
         with col3:
 
             pdf = create_pdf(
-
                 filename,
-
                 analysis["summary"],
-
                 analysis["key_points"],
-
                 analysis["action_items"]
-
             )
 
             st.download_button(
-
                 "📄 PDF Report",
-
                 pdf,
-
-                file_name=(
-                    "meeting_report.pdf"
-                ),
-
+                file_name="meeting_report.pdf",
                 mime="application/pdf",
-
                 use_container_width=True
             )
 
@@ -1620,6 +1751,10 @@ elif page == "📚 Meeting History":
 
     else:
 
+        # -------------------------------------------------
+        # SEARCH
+        # -------------------------------------------------
+
         search = st.text_input(
             "🔎 Search meetings"
         )
@@ -1639,29 +1774,30 @@ elif page == "📚 Meeting History":
 
             filtered = meetings
 
-
         st.dataframe(
             filtered,
             use_container_width=True,
             hide_index=True
         )
 
-
         st.divider()
+
+        # -------------------------------------------------
+        # MEETING ID
+        # -------------------------------------------------
 
         meeting_id = st.number_input(
             "Enter Meeting ID",
             min_value=1,
-            step=1
+            step=1,
+            key="history_meeting_id"
         )
-
 
         col1, col2 = st.columns(2)
 
-
-        # -----------------------------------------------------
-        # VIEW
-        # -----------------------------------------------------
+        # =================================================
+        # VIEW MEETING
+        # =================================================
 
         with col1:
 
@@ -1688,7 +1824,6 @@ elif page == "📚 Meeting History":
                         created_at
                     ) = meeting
 
-
                     st.subheader(
                         filename
                     )
@@ -1697,7 +1832,7 @@ elif page == "📚 Meeting History":
                         f"Created: {created_at}"
                     )
 
-
+                    # Summary
                     st.write(
                         "### 📋 Summary"
                     )
@@ -1706,7 +1841,7 @@ elif page == "📚 Meeting History":
                         summary
                     )
 
-
+                    # Key points
                     st.write(
                         "### 💡 Key Points"
                     )
@@ -1717,10 +1852,12 @@ elif page == "📚 Meeting History":
                             key_points
                         )
 
-                    except:
+                    except (
+                        json.JSONDecodeError,
+                        TypeError
+                    ):
 
                         points = []
-
 
                     for point in points:
 
@@ -1728,7 +1865,7 @@ elif page == "📚 Meeting History":
                             f"✅ {point}"
                         )
 
-
+                    # Transcript
                     st.write(
                         "### 📝 Transcript"
                     )
@@ -1741,6 +1878,10 @@ elif page == "📚 Meeting History":
                             transcript
                         )
 
+                    # Action items
+                    st.write(
+                        "### ✅ Action Items"
+                    )
 
                     try:
 
@@ -1748,14 +1889,12 @@ elif page == "📚 Meeting History":
                             action_items
                         )
 
-                    except:
+                    except (
+                        json.JSONDecodeError,
+                        TypeError
+                    ):
 
                         tasks = []
-
-
-                    st.write(
-                        "### ✅ Action Items"
-                    )
 
                     if tasks:
 
@@ -1764,7 +1903,6 @@ elif page == "📚 Meeting History":
                         for task in tasks:
 
                             task_table.append(
-
                                 {
                                     "Task":
                                         task.get(
@@ -1796,7 +1934,6 @@ elif page == "📚 Meeting History":
                                             "Pending"
                                         )
                                 }
-
                             )
 
                         st.dataframe(
@@ -1813,17 +1950,15 @@ elif page == "📚 Meeting History":
                             "No action items."
                         )
 
-
                 else:
 
                     st.error(
                         "Meeting not found."
                     )
 
-
-        # -----------------------------------------------------
-        # DELETE
-        # -----------------------------------------------------
+        # =================================================
+        # DELETE MEETING
+        # =================================================
 
         with col2:
 
@@ -1873,6 +2008,10 @@ elif page == "✅ Tasks":
 
     all_tasks = []
 
+    # -----------------------------------------------------
+    # COLLECT ALL TASKS
+    # -----------------------------------------------------
+
     for _, row in meetings.iterrows():
 
         meeting_id = int(
@@ -1885,6 +2024,7 @@ elif page == "✅ Tasks":
         )
 
         if not meeting:
+
             continue
 
         try:
@@ -1893,15 +2033,18 @@ elif page == "✅ Tasks":
                 meeting[6]
             )
 
-        except:
+        except (
+            json.JSONDecodeError,
+            TypeError
+        ):
 
             tasks = []
 
-
-        for index, task in enumerate(tasks):
+        for index, task in enumerate(
+            tasks
+        ):
 
             all_tasks.append(
-
                 {
                     "meeting_id":
                         meeting_id,
@@ -1942,9 +2085,11 @@ elif page == "✅ Tasks":
                             "Pending"
                         )
                 }
-
             )
 
+    # =====================================================
+    # DISPLAY TASKS
+    # =====================================================
 
     if all_tasks:
 
@@ -1952,12 +2097,13 @@ elif page == "✅ Tasks":
             all_tasks
         )
 
-
-        # -----------------------------------------------------
+        # -------------------------------------------------
         # STATISTICS
-        # -----------------------------------------------------
+        # -------------------------------------------------
 
-        total = len(dataframe)
+        total = len(
+            dataframe
+        )
 
         pending = len(
             dataframe[
@@ -1972,7 +2118,6 @@ elif page == "✅ Tasks":
                 == "Completed"
             ]
         )
-
 
         col1, col2, col3 = st.columns(3)
 
@@ -1991,13 +2136,11 @@ elif page == "✅ Tasks":
             completed
         )
 
-
         st.divider()
 
-
-        # -----------------------------------------------------
+        # -------------------------------------------------
         # FILTER
-        # -----------------------------------------------------
+        # -------------------------------------------------
 
         status_filter = st.selectbox(
             "Filter tasks",
@@ -2005,9 +2148,9 @@ elif page == "✅ Tasks":
                 "All",
                 "Pending",
                 "Completed"
-            ]
+            ],
+            key="task_filter"
         )
-
 
         if status_filter != "All":
 
@@ -2019,7 +2162,6 @@ elif page == "✅ Tasks":
         else:
 
             display_df = dataframe
-
 
         st.dataframe(
             display_df[
@@ -2037,10 +2179,9 @@ elif page == "✅ Tasks":
             hide_index=True
         )
 
-
-        # -----------------------------------------------------
-        # UPDATE STATUS
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # UPDATE TASK STATUS
+        # -------------------------------------------------
 
         st.divider()
 
@@ -2067,9 +2208,9 @@ elif page == "✅ Tasks":
             [
                 "Pending",
                 "Completed"
-            ]
+            ],
+            key="new_task_status"
         )
-
 
         if st.button(
             "🔄 Update Status",
@@ -2077,15 +2218,10 @@ elif page == "✅ Tasks":
         ):
 
             success = update_task_status(
-
                 selected_meeting,
-
                 st.session_state.user_id,
-
                 selected_task - 1,
-
                 new_status
-
             )
 
             if success:
@@ -2101,7 +2237,6 @@ elif page == "✅ Tasks":
                 st.error(
                     "Meeting or task not found."
                 )
-
 
     else:
 
@@ -2124,40 +2259,46 @@ elif page == "⚙️ System Status":
         "🧠 AI Components"
     )
 
-
-    # WHISPER
-
-    st.write(
-        "🎤 **Faster-Whisper**"
-    )
-
-    st.success(
-        "Installed and configured for local transcription."
-    )
-
-
-    # OLLAMA
+    # -----------------------------------------------------
+    # GEMINI
+    # -----------------------------------------------------
 
     st.write(
-        "🤖 **Ollama**"
+        "☁️ **Gemini Cloud AI**"
     )
 
-    ollama_ok, message = check_ollama()
-
-    if ollama_ok:
+    if get_gemini_api_key():
 
         st.success(
-            message
+            f"Gemini is configured successfully "
+            f"using {GEMINI_MODEL}."
         )
 
     else:
 
         st.error(
-            message
+            "Gemini API key is not configured."
         )
 
+        st.info(
+            "Add GEMINI_API_KEY in Streamlit Cloud Secrets."
+        )
 
+    # -----------------------------------------------------
+    # AUDIO PROCESSING
+    # -----------------------------------------------------
+
+    st.write(
+        "🎵 **Audio Processing**"
+    )
+
+    st.success(
+        "Audio is uploaded directly to Gemini for analysis."
+    )
+
+    # -----------------------------------------------------
     # DATABASE
+    # -----------------------------------------------------
 
     st.write(
         "🗄️ **SQLite Database**"
@@ -2175,6 +2316,9 @@ elif page == "⚙️ System Status":
             f"{DATABASE} does not exist yet."
         )
 
+    # -----------------------------------------------------
+    # CONFIGURATION
+    # -----------------------------------------------------
 
     st.divider()
 
@@ -2182,29 +2326,46 @@ elif page == "⚙️ System Status":
         "📦 Configuration"
     )
 
+    gemini_status = (
+        "Configured"
+        if get_gemini_api_key()
+        else "Not configured"
+    )
+
     st.code(
         f"""
-Ollama URL:
-{OLLAMA_URL}
+AI Provider:
+Gemini Cloud AI
 
-Ollama Model:
-{OLLAMA_MODEL}
+Gemini Model:
+{GEMINI_MODEL}
+
+Gemini API:
+{gemini_status}
 
 Database:
 {DATABASE}
 
-Whisper:
-Faster-Whisper base
+Transcription:
+Gemini Audio Understanding
 
-AI Mode:
-100% Local
+AI Analysis:
+Gemini Cloud AI
+
+Local AI:
+Disabled
+
+Ollama:
+Removed
+
+OpenAI:
+Removed
 """
     )
 
-
     st.info(
-        "This project does not require an OpenAI API key. "
-        "Whisper and Llama run locally."
+        "Voice2Action uses Gemini Cloud AI to "
+        "transcribe and analyze meeting recordings."
     )
 
 
@@ -2216,6 +2377,6 @@ st.divider()
 
 st.caption(
     "Voice2Action • Stage 5 • "
-    "Local AI Meeting Assistant • "
-    "Faster-Whisper + Ollama + SQLite"
+    "AI Meeting Assistant • "
+    "Gemini Cloud AI + SQLite"
 )
