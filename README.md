@@ -1,16 +1,13 @@
 ﻿# Voice-notes-to-Action-Items
 # 🎙️ Voice2Action
 
-### Voice Notes → Intelligent Action Items
-
-Voice2Action is an AI-powered application that converts voice recordings into meaningful transcripts, identifies important tasks, and organizes them into actionable items.
+> AI-powered meeting assistant that converts meeting audio into transcripts, summaries, key points, and actionable tasks.
 
 ## 🚀 Live Demo
 
-Experience Voice2Action in action:
+👉 **[Open Voice2Action](https://voice-to-action-c9wgg3ps3ghucyosxqxz7t.streamlit.app/)**
 
-👉 [Open Voice2Action](http://localhost:8501)
-
+🌐 The application is publicly accessible from any device with an internet connection.
 ## 📌 Features
 
 - 🎤 Voice recording and audio input
